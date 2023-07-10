@@ -39,6 +39,8 @@ typedef int (*FUNC_POSIX_MEMALIGN)(void **memptr, size_t alignment, size_t size)
 typedef void* (*FUNC_MEMALIGN)(size_t boundary, size_t size);
 typedef void* (*FUNC_ALIGNED_ALLOC)(size_t alignment, size_t size);
 typedef void (*FUNC_FREE)(void *ptr);
+typedef void* (*FUNC_MMAP)(void* start, size_t length, int prot, int flags, int fd, off_t offset);
+typedef int(*FUNC_MUNMAP)(void* start, size_t length);
 static FUNC_MALLOC g_pfnMalloc = NULL;
 static FUNC_CALLOC g_pfnCalloc = NULL;
 static FUNC_REALLOC g_pfnRealloc = NULL;
@@ -48,6 +50,8 @@ static FUNC_POSIX_MEMALIGN g_pfnPosixMemalign = NULL;
 static FUNC_MEMALIGN g_pfnMemalign = NULL;
 static FUNC_ALIGNED_ALLOC g_pfnAlignAlloc = NULL;
 static FUNC_FREE g_pfnFree = NULL;
+static FUNC_MMAP g_pfnMmap = NULL;
+static FUNC_MUNMAP g_pfnMunmap = NULL;
 
 // 定义backtrace函数
 static int(*g_pfnBackTrace)(void** stack, int size);
@@ -78,6 +82,14 @@ struct PtrRep
 
 //哈希表存储堆栈信息
 static BtInfo* g_hashTable[TABLE_SIZE] = { 0 };
+
+//单向链表来存放无法使用封装mmap/munmap操作的内存，即映射文件的方式
+struct UnmapPtr
+{
+	struct UnmapPtr*	next;	
+	void*				ptr;
+};
+static UnmapPtr* g_listHeadUnmapPtr;
 
 /*  gcc内置函数 */
 /***********************************************/
@@ -135,6 +147,8 @@ static void InitMemFunc()
 	g_pfnMemalign = (FUNC_MEMALIGN)dlsym(RTLD_NEXT, "memalign");
 	g_pfnPosixMemalign = (FUNC_POSIX_MEMALIGN)dlsym(RTLD_NEXT, "posix_memalign");
 	g_pfnAlignAlloc = (FUNC_ALIGNED_ALLOC)dlsym(RTLD_NEXT, "aligned_alloc");
+	g_pfnMmap = (FUNC_MMAP)dlsym(RTLD_NEXT, "mmap");
+	g_pfnMunmap = (FUNC_MUNMAP)dlsym(RTLD_NEXT, "munmap");
 }
 
 // 配置
@@ -352,6 +366,7 @@ __attribute__((constructor)) static void InitAll()
 	{
 		PRT("signal failed, signNum:%d\n", g_rptSignal);
 	}
+	g_listHeadUnmapPtr = NULL;
 	g_bInitFlag = true;
 }
 
@@ -437,6 +452,57 @@ static void DelStackInfo(void* &ptr)
 	int exterLength = pRep->stack->extraLength;
 	__sync_sub_and_fetch(&pRep->stack->count,1);
 	ptr = (void*)((char*)ptr - exterLength);
+}
+
+//用于缓冲mmap的栈信息
+static void AddMmapStackInfo(void* ptr, int totalLength)
+{
+	int count = (totalLength % g_pageSize == 0 ? 0:1);
+	totalLength = (totalLength / g_pageSize + count)*g_pageSize;
+	mprotect((void*)((char*)ptr + totalLength - g_pageSize), PROT_READ|PROT_WRITE);//扩展内存确认可写
+	PtrRep* pRep = (PtrRep*)((char*)ptr + totalLength - sizeof(PtrRep));
+	pRep->flag = FLAG_VALUE;
+	BtInfo* cur = new BtInfo;
+	cur->next = nullptr;
+	cur->requestLength = totalLength - g_pageSize;
+	cur->extraLength = g_pageSize;
+	cur->count = 1;
+	cur->depth = g_pfnBackTrace(cur->bt, g_maxStackDepth);
+	cur->hash = GetHashValue(cur->bt, cur->depth);
+	int index = cur->hash % TABLE_SIZE;
+	//如果数组索引为空，替换为cur，并返回原先的nullptr
+	BtInfo* tmp = (BtInfo*)__sync_val_compare_and_swap(&g_hashTable[index], nullptr, cur);
+	if (tmp == nullptr)
+	{//第一次插入
+		pRep->stack = cur;
+		return;
+	}
+	while (true)
+	{
+		if (IsEqual(tmp, cur))
+		{//相等则计数加一
+			__sync_add_and_fetch(&(tmp->count), 1);
+			pRep->stack = tmp;
+			delete cur;
+			return;
+		}
+		// tmp指向链表下一个
+		tmp = (BtInfo*)__sync_val_compare_and_swap(&tmp->next, nullptr, cur);
+		if (tmp == nullptr)
+		{//已经插入链表尾
+			pRep->stack = cur;
+			return;
+		}
+	}
+	return;
+}
+
+//用于mmap缓冲栈信息
+static void DelMmapStackInfo(void* &ptr, int totalLength)
+{
+	PtrRep* pRep = (PtrRep*)((char*)ptr + totalLength - sizeof(PtrRep));
+	int exterLength = pRep->stack->extraLength;
+	__sync_sub_and_fetch(&pRep->stack->count, 1);
 }
 void* malloc(size_t bytes)
 {
@@ -632,16 +698,94 @@ void* aligned_alloc(size_t alignment, size_t size)
 	return memalign(alignment, size);
 }
 
-
-
-
-
-
-
-
-
-
-
+void* mmap(void* start, size_t length, int prot, int flags, int fd, off_t offset)
+{
+	InitAll();
+	if (!g_bInitFlag)
+	{
+		return g_pfnMmap(start, length, prot, flags, fd, offset);
+	}
+	if (g_tlsKey == 1)
+	{
+		return g_pfnMmap(start, length, prot, flags, fd, offset);
+	}
+	if (fd > 0) //文件映射内存没法扩展，不统计
+	{
+		void* pRet = g_pfnMmap(start, length, prot, flags, fd, offset);
+		if (pRet != (void*)(-1))// 插入链表，记录不使用封装munmap
+		{
+			UnmapPtr* cur = new UnmapPtr;
+			cur->next = NULL;
+			cur->ptr = pRet;
+			UnmapPtr* tmp = (UnmapPtr*)__sync_val_compare_and_swap(&g_listHeadUnmapPtr, NULL, cur);
+			while (tmp != NULL)
+			{
+				tmp = (UnmapPtr*)__sync_val_compare_and_swap(&tmp->next, NULL, cur);
+			}
+		}
+		return pRet;
+	}
+	g_tlsKey = 1;
+	length += g_pageSize;
+	void* pRet = mmap(start, length, prot, flags, fd, offset);
+	if (pRet != (void*)(-1))
+	{
+		AddMmapStackInfo(pRet, length);
+	}
+	g_tlsKey = 0;
+	return pRet;
+}
+void* mmap64(void* start, size_t length, int prot, int flags, int fd, off_t offset)
+{
+	return mmap(start, length, prot, flags, fd, offset);
+}
+int munmap(void* start, size_t length)
+{
+	InitAll();
+	if (!g_bInitFlag)
+	{
+		return g_pfnMunmap(start, length);
+	}
+	if (start == NULL)
+	{
+		return -1;
+	}
+	if (g_tlsKey == 1)
+	{
+		return g_pfnMunmap(start, length);
+	}
+	//查询是否为文件映射
+	UnmapPtr* tmp = g_listHeadUnmapPtr;
+	if (start == tmp->ptr)
+	{
+		__sync_val_compare_and_swap(&g_listHeadUnmapPtr, g_listHeadUnmapPtr, g_listHeadUnmapPtr->next);
+		delete tmp;
+		return g_pfnMunmap(start, length);
+	}
+	while (tmp->next != NULL)
+	{
+		UnmapPtr* preTmp = tmp;
+		tmp = (UnmapPtr*)__sync_val_compare_and_swap(&tmp->next, NULL, NULL);
+		if (tmp != NULL && tmp->ptr == start)
+		{
+			__sync_val_compare_and_swap(&preTmp->next, preTmp->next, tmp->next);
+			delete tmp;
+			return g_pfnMunmap(start, length);
+		}
+	}
+	int count = (length % g_pageSize == 0 ? 0 : 1);
+	int tmpSize = (length / g_pageSize + count)*g_pageSize;
+	size_t flag = *(size_t*)((char*)start + tmpSize - sizeof(size_t));
+	if (flag != FLAG_VALUE)
+	{
+		return g_pfnMunmap(start, length);
+	}
+	g_tlsKey = 1;
+	DelMmapStackInfo(start, tmpSize);
+	int iRet = munmap(start, length + g_pageSize);
+	g_tlsKey = 0;
+	return iRet;
+}
 
 
 
