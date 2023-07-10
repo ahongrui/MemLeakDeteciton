@@ -139,7 +139,7 @@ static void InitMemFunc()
 
 // 配置
 static int	g_maxStackDepth = MAX_STACK_DEPTH; 	//bt栈深度
-static char g_btType[10] = "libc";				//bt方式：libc/gcc/asm/unwind
+static char g_btType[10] = "unw";				//bt方式：libc/gcc/asm/unw
 static int 	g_rptSignal = RPT_SIGNAL;			//用户通知信号
 static char g_rptPath[1024] = {0};				//默认输出路径
 static char g_rptFile[128] = { 0 };				//输出文件名称
@@ -227,12 +227,14 @@ static void InitBtFunc()
 		void* handle = dlopen(g_libunwindPath, RTLD_NOW|RTLD_LOCAL|RTLD_DEEPBIND);
 		if (handle == nullptr)
 		{
+			g_pfnBackTrace = gccBacktrace;
 			PRT("dlopen failed, %s\n",dlerror());
 			return;
 		}
 		g_pfnBackTrace = (int(*)(void**, int))dlsym(handle, "unw_backtrace");
 		if (g_pfnBackTrace == nullptr)
 		{
+			g_pfnBackTrace = gccBacktrace;
 			PRT("dlsym failed, %s\n", dlerror());
 			return;
 		}
@@ -335,6 +337,12 @@ static void SigHandle(int sigNum)
 //  __attribute__((constructor)) -- 该函数在main函数之前被执行，完成初始化
 __attribute__((constructor)) static void InitAll() 
 {
+	static int g_init = 0;
+	if (g_init == 1)
+	{
+		return;
+	}
+	g_init = 1;
 	InitMemFunc();
 	InitConfig();
 	InitBtFunc();
@@ -432,6 +440,7 @@ static void DelStackInfo(void* &ptr)
 }
 void* malloc(size_t bytes)
 {
+	InitAll();
 	if (!g_bInitFlag)
 	{
 		return g_pfnMalloc(bytes);
@@ -455,6 +464,7 @@ void* malloc(size_t bytes)
 
 void free(void* mem)
 {
+	InitAll();
 	if (!g_bInitFlag)
 	{
 		g_pfnFree(mem);
@@ -483,6 +493,7 @@ void free(void* mem)
 
 void* calloc(size_t cnt, size_t size)
 {
+	InitAll();
 	if (!g_bInitFlag)
 	{
 		return g_pfnCalloc == nullptr? nullptr:g_pfnCalloc(cnt, size);
@@ -511,6 +522,7 @@ void* calloc(size_t cnt, size_t size)
 
 void* realloc(void* ptr, size_t size)
 {
+	InitAll();
 	if (!g_bInitFlag)
 	{
 		return g_pfnRealloc(ptr, size);
@@ -547,6 +559,7 @@ void* realloc(void* ptr, size_t size)
 
 void* memalign(size_t alignment, size_t size)
 {
+	InitAll();
 	if (!g_bInitFlag)
 	{
 		return g_pfnMemalign(alignment, size);
@@ -585,6 +598,7 @@ void* pvalloc(size_t size)
 
 int posix_memalign(void** ptr, size_t alignment, size_t size)
 {
+	InitAll();
 	if (!g_bInitFlag)
 	{
 		return g_pfnPosixMemalign(ptr, alignment, size);
