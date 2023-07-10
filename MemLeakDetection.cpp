@@ -10,13 +10,19 @@
 #include <time.h>
 #include <signal.h>
 #include <malloc.h>
-
+#include <sys/mman.h>
 #define PRT printf
 #define TABLE_SIZE	98317UL
 #define MAX_STACK_DEPTH 32
 #define RPT_SIGNAL 64
 #define DEF_PAGE_SIZE 4096
 #define DEF_OUTPUT_PATH 	"./"
+
+#if (define (__x86_64__) || define (__aarch64__))
+#define FLAG_VALUE 0XFFFFFFFFFFFFFFFF
+#else
+#define FLAG_VALUE 0XFFFFFFFF
+#endif
 
 extern "C" void* __libc_malloc(size_t bytes);
 extern "C" void* __libc_free(void* mem);
@@ -67,6 +73,7 @@ struct BtInfo
 struct PtrRep
 {
 	BtInfo* stack;
+	size_t  flag;
 };
 
 //哈希表存储堆栈信息
@@ -378,6 +385,7 @@ static bool IsEqual(const BtInfo* ptr1, const BtInfo* ptr2)
 static void AddStackInfo(void* ptr, int totalLength, int extraLength)
 {
 	PtrRep* pRep = (PtrRep*)((char*)ptr + extraLength - sizeof(PtrRep));
+	pRep->flag = FLAG_VALUE;
 	BtInfo* cur = new BtInfo;
 	cur->next = nullptr;
 	cur->requestLength = totalLength - extraLength;
@@ -457,6 +465,12 @@ void free(void* mem)
 		return;
 	}
 	if (g_tlsKey == 1)
+	{
+		g_pfnFree(mem);
+		return;
+	}
+	size_t flag = *(size_t*)((char*)mem - sizeof(size_t));
+	if (flag != FLAG_VALUE)// 判断是否为mla封装函数申请的内存
 	{
 		g_pfnFree(mem);
 		return;
