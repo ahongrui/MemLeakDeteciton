@@ -18,10 +18,10 @@
 #define DEF_PAGE_SIZE 4096
 #define DEF_OUTPUT_PATH 	"./"
 
-#if (define (__x86_64__) || define (__aarch64__))
-#define FLAG_VALUE 0XFFFFFFFFFFFFFFFF
+#if (defined (__x86_64__) || defined (__aarch64__))
+#define FLAG_VALUE 0Xffffffffffffffff
 #else
-#define FLAG_VALUE 0XFFFFFFFF
+#define FLAG_VALUE 0Xffffffff
 #endif
 
 extern "C" void* __libc_malloc(size_t bytes);
@@ -401,6 +401,49 @@ static bool IsEqual(const BtInfo* ptr1, const BtInfo* ptr2)
 	return true;
 }
 
+//用于缓冲mmap的栈信息
+static void AddMmapStackInfo(void* ptr, int totalLength)
+{
+	int count = (totalLength % g_pageSize == 0 ? 0:1);
+	totalLength = (totalLength / g_pageSize + count)*g_pageSize;
+	mprotect((void*)((char*)ptr + totalLength - g_pageSize), g_pageSize, PROT_READ|PROT_WRITE);//扩展内存确认可写
+	PtrRep* pRep = (PtrRep*)((char*)ptr + totalLength - sizeof(PtrRep));
+	pRep->flag = FLAG_VALUE;
+	BtInfo* cur = new BtInfo;
+	cur->next = nullptr;
+	cur->requestLength = totalLength - g_pageSize;
+	cur->extraLength = g_pageSize;
+	cur->count = 1;
+	cur->depth = g_pfnBackTrace(cur->bt, g_maxStackDepth);
+	cur->hash = GetHashValue(cur->bt, cur->depth);
+	int index = cur->hash % TABLE_SIZE;
+	//如果数组索引为空，替换为cur，并返回原先的nullptr
+	BtInfo* tmp = (BtInfo*)__sync_val_compare_and_swap(&g_hashTable[index], nullptr, cur);
+	if (tmp == nullptr)
+	{//第一次插入
+		pRep->stack = cur;
+		return;
+	}
+	while (true)
+	{
+		if (IsEqual(tmp, cur))
+		{//相等则计数加一
+			__sync_add_and_fetch(&(tmp->count), 1);
+			pRep->stack = tmp;
+			delete cur;
+			return;
+		}
+		// tmp指向链表下一个
+		tmp = (BtInfo*)__sync_val_compare_and_swap(&tmp->next, nullptr, cur);
+		if (tmp == nullptr)
+		{//已经插入链表尾
+			pRep->stack = cur;
+			return;
+		}
+	}
+	return;
+}
+
 // 将申请内存的栈信息存入hashtable中
 // ptr -- 真实申请的内存地址  == 额外扩展内存+返回用户内存
 //totalLength: 实际总长度 
@@ -454,48 +497,7 @@ static void DelStackInfo(void* &ptr)
 	ptr = (void*)((char*)ptr - exterLength);
 }
 
-//用于缓冲mmap的栈信息
-static void AddMmapStackInfo(void* ptr, int totalLength)
-{
-	int count = (totalLength % g_pageSize == 0 ? 0:1);
-	totalLength = (totalLength / g_pageSize + count)*g_pageSize;
-	mprotect((void*)((char*)ptr + totalLength - g_pageSize), PROT_READ|PROT_WRITE);//扩展内存确认可写
-	PtrRep* pRep = (PtrRep*)((char*)ptr + totalLength - sizeof(PtrRep));
-	pRep->flag = FLAG_VALUE;
-	BtInfo* cur = new BtInfo;
-	cur->next = nullptr;
-	cur->requestLength = totalLength - g_pageSize;
-	cur->extraLength = g_pageSize;
-	cur->count = 1;
-	cur->depth = g_pfnBackTrace(cur->bt, g_maxStackDepth);
-	cur->hash = GetHashValue(cur->bt, cur->depth);
-	int index = cur->hash % TABLE_SIZE;
-	//如果数组索引为空，替换为cur，并返回原先的nullptr
-	BtInfo* tmp = (BtInfo*)__sync_val_compare_and_swap(&g_hashTable[index], nullptr, cur);
-	if (tmp == nullptr)
-	{//第一次插入
-		pRep->stack = cur;
-		return;
-	}
-	while (true)
-	{
-		if (IsEqual(tmp, cur))
-		{//相等则计数加一
-			__sync_add_and_fetch(&(tmp->count), 1);
-			pRep->stack = tmp;
-			delete cur;
-			return;
-		}
-		// tmp指向链表下一个
-		tmp = (BtInfo*)__sync_val_compare_and_swap(&tmp->next, nullptr, cur);
-		if (tmp == nullptr)
-		{//已经插入链表尾
-			pRep->stack = cur;
-			return;
-		}
-	}
-	return;
-}
+
 
 //用于mmap缓冲栈信息
 static void DelMmapStackInfo(void* &ptr, int totalLength)
@@ -638,7 +640,7 @@ void* memalign(size_t alignment, size_t size)
 	int extraLength = alignment;
 	if (alignment < sizeof(PtrRep))
 	{
-		extraLength = (sizeof(PtrRep) / alignment + 1) * sizeof(PtrRep);
+		extraLength = (sizeof(PtrRep) / alignment + 1) * alignment;
 	}
 	size += extraLength;
 	void* pRet = memalign(alignment, size);
@@ -677,7 +679,7 @@ int posix_memalign(void** ptr, size_t alignment, size_t size)
 	int extraLength = alignment;
 	if (alignment < sizeof(PtrRep))
 	{
-		extraLength = (sizeof(PtrRep) / alignment + 1) * sizeof(PtrRep);
+		extraLength = (sizeof(PtrRep) / alignment + 1) * alignment;
 	}
 	size += extraLength;
 	void* pRet = nullptr;
@@ -728,7 +730,7 @@ void* mmap(void* start, size_t length, int prot, int flags, int fd, off_t offset
 	g_tlsKey = 1;
 	length += g_pageSize;
 	void* pRet = mmap(start, length, prot, flags, fd, offset);
-	if (pRet != (void*)(-1))
+	if (pRet != (void*)-1)
 	{
 		AddMmapStackInfo(pRet, length);
 	}
