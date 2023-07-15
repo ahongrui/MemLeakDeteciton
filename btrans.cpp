@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
-
+#include <sys/time.h>
 #define SO_NAME "libmla.so"
 static std::string g_path;
 static size_t g_count = 0;
@@ -39,6 +39,14 @@ static void SplitString(const char* buf, char c, std::vector<std::string>& vec)
 	}
 }
 
+static int64_t GetTimeTick()
+{
+	struct timespec spec;
+	memset(&spec, 0x0, siseof(struct timspec));
+	clock_gettime(CLOCK_MONOTONIC,&spec);
+	return (int64_t)((spec.tv_sec*1000)+(spec.tv_nsec+1000000/2)/1000000);
+}
+
 static bool Compare(const StaticInfo& bt1, const StaticInfo& bt2)
 {
 	return bt1.total > bt2.total;
@@ -68,8 +76,9 @@ static void BtTrans(char* btFile, char* txtFile)
 		printf("input file open failed\n");
 		return;
 	}
-	char buf[1024] = { 0 };
+	char buf[10240] = { 0 };
 	int firstLine = 1;
+	printf("time:%ld, start transition...\n",GetTimeTick());
 	while (iFile.getline(buf, sizeof(buf)))
 	{
 		if (firstLine)
@@ -102,6 +111,7 @@ static void BtTrans(char* btFile, char* txtFile)
 		g_vecStaticInfos.push_back(tmpStaticInfo);
 		memset(buf, 0, sizeof(buf));
 	}
+	printf("time:%ld, complete transition, input file...\n",GetTimeTick());
 	std::sort(g_vecStaticInfos.begin(), g_vecStaticInfos.end(), Compare);
 	//写入输出文件
 	std::ofstream oFile(txtFile, std::ios_base::trunc);
@@ -118,17 +128,17 @@ static void BtTrans(char* btFile, char* txtFile)
 		double totalPercent = 100.0*tmpStaticInfo.total / g_total;
 		double countPercent = 100.0*tmpStaticInfo.count / g_count;
 		oFile << "total: " << tmpStaticInfo.total << " " << totalPercent << " " 
-			<< "count: " << tmpStaticInfo.count << " " << totalPercent << std::endl;
+			<< "count: " << tmpStaticInfo.count << " " << countPercent << std::endl;
 		int idx = 0;
 		for (int j = 0; j < tmpStaticInfo.vecBt.size(); ++j)
 		{
 			std::string& tmpStr = tmpStaticInfo.vecBt[j];
 			int iPos = tmpStr.find(":");
 			std::string strSoPath = tmpStr.substr(0, iPos);
-			if (strSoPath.find(SO_NAME) != std::string::npos)
+/* 			if (strSoPath.find(SO_NAME) != std::string::npos)
 			{
 				continue;
-			}
+			} */
 			if (strSoPath == "unknow")
 			{
 				oFile << "#" << idx++ << " " << strSoPath << std::endl;
@@ -139,6 +149,7 @@ static void BtTrans(char* btFile, char* txtFile)
 		}
 		oFile << std::endl;
 	}
+	printf("time:%ld, completed\n",GetTimeTick());
 }
 
 int main(int argc, char** argv)

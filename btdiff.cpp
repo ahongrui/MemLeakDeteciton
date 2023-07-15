@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
-
+#include <sys/time.h>
 #define SO_NAME "libmla.so"
 static std::string g_path;
 static size_t g_count = 0;
@@ -58,7 +58,13 @@ static std::string BtAddr2Line(std::string& strSoPath, std::string& strAddr)
 	pclose(pp);
 	return std::string(buf);
 }
-
+static int64_t GetTimeTick()
+{
+	struct timespec spec;
+	memset(&spec, 0x0, siseof(struct timspec));
+	clock_gettime(CLOCK_MONOTONIC,&spec);
+	return (int64_t)((spec.tv_sec*1000)+(spec.tv_nsec+1000000/2)/1000000);
+}
 void LoadBtFile(char* btFile, std::vector<StaticInfo>& vecStaticInfo)
 {
 	//先读取bt文件
@@ -68,7 +74,7 @@ void LoadBtFile(char* btFile, std::vector<StaticInfo>& vecStaticInfo)
 		printf("input file open failed\n");
 		return;
 	}
-	char buf[1024] = { 0 };
+	char buf[10240] = { 0 };
 	int firstLine = 1;
 	while (iFile.getline(buf, sizeof(buf)))
 	{
@@ -106,10 +112,12 @@ void LoadBtFile(char* btFile, std::vector<StaticInfo>& vecStaticInfo)
 
 static void BtDiff(char* btFile1, char* btFile2, char* txtFile)
 {
+	printf("time:%ld, start transition...\n",GetTimeTick());
 	std::vector<StaticInfo> vecStaticInfo_1;
 	std::vector<StaticInfo> vecStaticInfo_2;
 	LoadBtFile(btFile1, vecStaticInfo_1);
 	LoadBtFile(btFile2, vecStaticInfo_2);
+	printf("time:%ld, complete transition, compare differences...\n",GetTimeTick());
 	for (int i = 0; i < vecStaticInfo_2.size(); ++i)
 	{
 		for (int j = 0; j < vecStaticInfo_1.size(); ++j)
@@ -132,15 +140,30 @@ static void BtDiff(char* btFile1, char* btFile2, char* txtFile)
 				}
 			}
 			if(!bEqual) continue;
-			vecStaticInfo_2[i].count -= vecStaticInfo_1[j].count;
-			vecStaticInfo_2[i].total -= vecStaticInfo_1[j].total;
+			if(vecStaticInfo_2[i].count <= vecStaticInfo_1[j].count)
+			{
+				vecStaticInfo_2[i].count = 0;
+			}
+			else
+			{
+				vecStaticInfo_2[i].count -= vecStaticInfo_1[j].count;
+			}
+			if(vecStaticInfo_2[i].total <= vecStaticInfo_1[j].total)	
+			{
+				vecStaticInfo_2[i].total = 0;
+			}
+			else
+			{
+				vecStaticInfo_2[i].total -= vecStaticInfo_1[j].total;
+			}
+			
 			g_count += vecStaticInfo_2[i].count;
 			g_total += vecStaticInfo_2[i].total;
 			vecStaticInfo_1[j].count = 0;
 			break;
 		}
 	}
-
+	printf("time:%ld, complete differences, input file...\n",GetTimeTick());
 	std::sort(vecStaticInfo_2.begin(), vecStaticInfo_2.end(), Compare);
 	//写入输出文件
 	std::ofstream oFile(txtFile, std::ios_base::trunc);
@@ -162,17 +185,17 @@ static void BtDiff(char* btFile1, char* btFile2, char* txtFile)
 		double totalPercent = 100.0*tmpStaticInfo.total / g_total;
 		double countPercent = 100.0*tmpStaticInfo.count / g_count;
 		oFile << "total: " << tmpStaticInfo.total << " " << totalPercent << " " 
-			<< "count: " << tmpStaticInfo.count << " " << totalPercent << std::endl;
+			<< "count: " << tmpStaticInfo.count << " " << countPercent << std::endl;
 		int idx = 0;
 		for (int j = 0; j < tmpStaticInfo.vecBt.size(); ++j)
 		{
 			std::string& tmpStr = tmpStaticInfo.vecBt[j];
 			int iPos = tmpStr.find(":");
 			std::string strSoPath = tmpStr.substr(0, iPos);
-			if (strSoPath.find(SO_NAME) != std::string::npos)
+/* 			if (strSoPath.find(SO_NAME) != std::string::npos)
 			{
 				continue;
-			}
+			} */
 			if (strSoPath == "unknow")
 			{
 				oFile << "#" << idx++ << " " << strSoPath << std::endl;
@@ -183,11 +206,20 @@ static void BtDiff(char* btFile1, char* btFile2, char* txtFile)
 		}
 		oFile << std::endl;
 	}
+	printf("time:%ld, completed\n",GetTimeTick());
 }
 
 bool JudgeFile(const char* file1,const char* file2)
 {
-	return true;
+	std::string str1 = file1;
+	std::string str2 = file2;
+	if(str1 > str2)
+	{
+		return false;
+	}
+	std::string sub1 = str1.substr(str1.find("pid"), str1.find("proc") - str1.find("pid"));
+	std::string sub2 = str2.substr(str2.find("pid"), str2.find("proc") - str2.find("pid"));
+	return sub1 == sub2;
 }
 int main(int argc, char** argv)
 {
