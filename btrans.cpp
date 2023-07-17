@@ -42,7 +42,7 @@ static void SplitString(const char* buf, char c, std::vector<std::string>& vec)
 static int64_t GetTimeTick()
 {
 	struct timespec spec;
-	memset(&spec, 0x0, siseof(struct timspec));
+	memset(&spec, 0x0, sizeof(timespec));
 	clock_gettime(CLOCK_MONOTONIC,&spec);
 	return (int64_t)((spec.tv_sec*1000)+(spec.tv_nsec+1000000/2)/1000000);
 }
